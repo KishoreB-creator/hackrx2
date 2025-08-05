@@ -71,7 +71,7 @@ def upsert_in_batches(index, records, namespace="ragtest", batch_size=96):
     for i in tqdm(range(0, len(records), batch_size), desc="Upserting to Pinecone"):
         batch = records[i:i + batch_size]
         if i % 5 == 0:
-           time.sleep(5)
+           time.sleep(10)
         index.upsert_records(namespace=namespace, records=batch)
 
 # === Main Endpoint ===
@@ -187,6 +187,7 @@ Answer the question clearly in 1-2 sentences.
             pass
 
     return {"answers": all_answers}
+
 
 
 
