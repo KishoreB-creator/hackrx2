@@ -6,9 +6,15 @@ import fitz  # PyMuPDF
 from pinecone import Pinecone
 import google.generativeai as genai
 from tqdm import tqdm
+import time
+from datetime import datetime
 
 # === API Keys ===
-INDEX_NAME = "hackrx-rag-llama"
+#INDEX_NAME = "hackrx-rag-llama"
+
+INDEX_NAME = "check-rag-llama"
+WRITE_INDEX_NAME = "write-rag-llama"
+
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
@@ -24,7 +30,23 @@ if not pc.has_index(INDEX_NAME):
             "field_map": {"text": "chunk_text"}
         }
     )
+
+# === Pinecone write ===
+pwc = Pinecone(api_key=PINECONE_API_KEY)
+if not pwc.has_index(WRITE_INDEX_NAME):
+    pwc.create_index_for_model(
+        name=WRITE_INDEX_NAME,
+        cloud="aws",
+        region="us-east-1",
+        embed={
+            "model": "llama-text-embed-v2",
+            "field_map": {"text": "chunk_text"}
+        }
+    )
+
 index = pc.Index(INDEX_NAME)
+windex = pwc.Index(WRITE_INDEX_NAME)
+
 
 # === FastAPI App ===
 app = FastAPI()
@@ -45,9 +67,11 @@ def extract_text(path: str) -> str:
     doc = fitz.open(path)
     return "\n".join([page.get_text() for page in doc])
 
-def upsert_in_batches(index, records, namespace="hackrx", batch_size=96):
+def upsert_in_batches(index, records, namespace="ragtest", batch_size=96):
     for i in tqdm(range(0, len(records), batch_size), desc="Upserting to Pinecone"):
         batch = records[i:i + batch_size]
+        if i % 5 == 0:
+           time.sleep(5)
         index.upsert_records(namespace=namespace, records=batch)
 
 # === Main Endpoint ===
@@ -55,7 +79,24 @@ def upsert_in_batches(index, records, namespace="hackrx", batch_size=96):
 def run(body: QueryRequest, authorization: str = Header(...)):
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid Authorization header")
+    
 
+    # Capture the Request 
+    
+    current_time = datetime.now()
+    doc_id = 'curl-request'+str(current_time.strftime("%H:%M:%S"))
+    
+    wrtext = [
+            {
+                "id": f"{doc_id}-{1}",
+                "chunk_text": str(body)
+            }
+          ]
+
+    windex.upsert_records(namespace="writerag", records=wrtext)
+
+    # Start the Process 
+    
     doc_id = get_pdf_hash(body.documents)
 
     try:
@@ -71,7 +112,10 @@ def run(body: QueryRequest, authorization: str = Header(...)):
     try:
         # Step 2: Extract and Chunk Text
         text = extract_text(pdf_path)
-        chunks = [text[i:i + 500] for i in range(0, len(text), 500)]
+        chunk_size = 1000
+        overlap = 100
+
+        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size - overlap)]
 
         # Step 3: Prepare records with chunk_text (auto-embedded by Pinecone)
         records = [
@@ -93,14 +137,14 @@ def run(body: QueryRequest, authorization: str = Header(...)):
             results = index.search(
                 namespace="hackrx",
                 query={
-                    "top_k": 10,
+                    "top_k": 20,
                     "inputs": {
                         "text": question
                     }
                 },
                 rerank={
                     "model": "bge-reranker-v2-m3",
-                    "top_n": 5,
+                    "top_n": 15,
                     "rank_fields": ["chunk_text"]
                 }
             )
@@ -112,6 +156,8 @@ def run(body: QueryRequest, authorization: str = Header(...)):
             prompt = f"""
 You are a helpful assistant.
 Use ONLY the following document context to answer the question.
+
+
 
 Context:
 \"\"\"{context}\"\"\"
@@ -139,4 +185,5 @@ Answer the question clearly in 1-2 sentences.
             pass
 
     return {"answers": all_answers}
+
 
