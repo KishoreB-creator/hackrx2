@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pydantic
+requests
+PyMuPDF==1.23.26 --only-binary :all:
+pinecone==7.0.2
+pinecone-client
+google-generativeai
+tqdm
+
