@@ -71,8 +71,13 @@ def upsert_in_batches(index, records, namespace="ragtest", batch_size=96):
     for i in tqdm(range(0, len(records), batch_size), desc="Upserting to Pinecone"):
         batch = records[i:i + batch_size]
         if i % 5 == 0:
+           time.sleep(5)
+        if (i == 12)  or (i == 24) :
            time.sleep(10)
-        index.upsert_records(namespace=namespace, records=batch)
+        try:
+           index.upsert_records(namespace=namespace, records=batch)
+        except Exception as e:
+           raise HTTPException(status_code=400, detail=f"PDF Ingestion error: {str(e)}")
 
 # === Main Endpoint ===
 @app.post("/hackrx/run", response_model=QueryResponse)
@@ -80,21 +85,7 @@ def run(body: QueryRequest, authorization: str = Header(...)):
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid Authorization header")
     
-
-    # Capture the Request 
     
-    current_time = datetime.now()
-    doc_id = 'curl-request'+str(current_time.strftime("%H:%M:%S"))
-    
-    wrtext = [
-            {
-                "id": f"{doc_id}-{1}",
-                "chunk_text": str(body)
-            }
-          ]
-
-    windex.upsert_records(namespace="writerag", records=wrtext)
-
     # Start the Process 
     
     doc_id = get_pdf_hash(body.documents)
@@ -109,6 +100,21 @@ def run(body: QueryRequest, authorization: str = Header(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"PDF download error: {str(e)}")
 
+    # Capture the Request 
+    
+    current_time = datetime.now()
+    ts_id = 'curl-request'+str(current_time.strftime("%H:%M:%S"))
+    
+    wrtext = [
+            {
+                "id": f"{ts_id}-{1}",
+                "category": f"{pdf_path}",
+                "chunk_text": str(body)
+            }
+          ]
+
+    windex.upsert_records(namespace="writerag", records=wrtext)
+
     try:
         # Step 2: Extract and Chunk Text
         text = extract_text(pdf_path)
@@ -121,15 +127,15 @@ def run(body: QueryRequest, authorization: str = Header(...)):
         records = [
             {
                 "id": f"{doc_id}-{i}",
+                "category": f"{pdf_path}",
                 "chunk_text": chunk
             }
             for i, chunk in enumerate(chunks)
         ]
         upsert_in_batches(index, records, namespace="hackrx")
-        
+        time.sleep(10)
 
         # Step 4: Query Pinecone per-question and ask Gemini
-        time.sleep(5)
         genai.configure(api_key=GOOGLE_API_KEY)
         model = genai.GenerativeModel("gemini-2.5-flash")
 
@@ -138,11 +144,15 @@ def run(body: QueryRequest, authorization: str = Header(...)):
         for question in body.questions:
             results = index.search(
                 namespace="hackrx",
+                 
                 query={
                     "top_k": 20,
                     "inputs": {
                         "text": question
-                    }
+                    },
+                    "filter": {
+                        "category": {"$eq": f"{pdf_path}"}
+                      }  
                 },
                 rerank={
                     "model": "bge-reranker-v2-m3",
@@ -157,9 +167,7 @@ def run(body: QueryRequest, authorization: str = Header(...)):
             context = "\n\n".join(top_chunks)
             prompt = f"""
 You are a helpful assistant.
-Use ONLY the following document context to answer the question.
-
-
+Use ONLY the following document context to answer the question.Use all the content provided to arrive at your answer.  If there is some information about quantifiable data, include that in your response.
 
 Context:
 \"\"\"{context}\"\"\"
@@ -187,7 +195,5 @@ Answer the question clearly in 1-2 sentences.
             pass
 
     return {"answers": all_answers}
-
-
 
 
